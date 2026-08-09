@@ -8,14 +8,14 @@ export default async function handler(req, res) {
     if (req.method === 'GET') return res.status(200).send('alive');
     if (req.method !== 'POST') return res.status(405).send('no');
 
+    const update = req.body;
+    const message = update.message;
+    if (!message) return res.status(200).send('ok');
+
+    const chatId = message.chat.id;
+    const text = message.text || '';
+
     try {
-        const update = req.body;
-        const message = update.message;
-        if (!message) return res.status(200).send('ok');
-
-        const chatId = message.chat.id;
-        const text = message.text || '';
-
         // دستور /start
         if (text === '/start') {
             await sendMsg(chatId,
@@ -40,11 +40,11 @@ export default async function handler(req, res) {
         const proc = await sendMsg(chatId, 'در حال پردازش...\nلطفاً صبر کنید.');
 
         // گرفتن لینک دانلود
-        const downloadUrl = await getDownloadLink(url);
+        const result = await getDownloadLink(url);
 
-        if (downloadUrl) {
+        if (result) {
             await editMsg(chatId, proc.message_id,
-                'لینک دانلود:\n' + downloadUrl + '\n\n⏳ این پیام بعد از ۳۰ ثانیه پاک می‌شه.'
+                'لینک دانلود:\n' + result + '\n\n⏳ این پیام بعد از ۳۰ ثانیه پاک می‌شه.'
             );
             // پاک کردن پیام بعد از ۳۰ ثانیه
             setTimeout(() => {
@@ -55,12 +55,15 @@ export default async function handler(req, res) {
                 'لطفاً دوباره تلاش کنید.'
             );
         }
-
-        res.status(200).send('ok');
     } catch (err) {
         console.error('Error:', err);
-        res.status(200).send('ok');
+        // اگه خطا داد پیام رو آپدیت کن
+        try {
+            await editMsg(chatId, proc.message_id, 'خطایی رخ داد. لطفاً دوباره تلاش کنید.');
+        } catch {}
     }
+
+    res.status(200).send('ok');
 }
 
 // ارسال پیام
@@ -88,26 +91,48 @@ async function deleteMsg(chatId, msgId) {
         await fetch(`${TELEGRAM_API}/deleteMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, message_id: msgId }),
+        body: JSON.stringify({ chat_id: chatId, message_id: msgId }),
         });
     } catch {}
 }
 
-// API کوبالت برای دریافت لینک دانلود
+// دریافت لینک دانلود — با تایم‌اوت و چند API
 async function getDownloadLink(url) {
+    // تلاش ۱: Cobalt API
     try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
         const r = await fetch('https://api.cobalt.tools/', {
             method: 'POST',
+            signal: controller.signal,
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
-                'User-Agent': 'ytbot/1.0',
             },
-            body: JSON.stringify({ url }),
+            body: JSON.stringify({
+                url: url,
+                videoQuality: '720',
+            }),
         });
+        clearTimeout(timer);
         const data = await r.json();
-        return data.url || null;
-    } catch {
-        return null;
-    }
+        if (data.url) return data.url;
+    } catch {}
+
+    // تلاش ۲: cobalt ws
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const r = await fetch('https://co.wuk.sh/api/json', {
+            method: 'POST',
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, vQuality: '720' }),
+        });
+        clearTimeout(timer);
+        const data = await r.json();
+        if (data.url) return data.url;
+    } catch {}
+
+    return null;
 }
