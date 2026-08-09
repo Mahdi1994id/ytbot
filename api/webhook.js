@@ -98,41 +98,61 @@ async function deleteMsg(chatId, msgId) {
 
 // دریافت لینک دانلود — با تایم‌اوت و چند API
 async function getDownloadLink(url) {
-    // تلاش ۱: Cobalt API
-    try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 5000);
-        const r = await fetch('https://api.cobalt.tools/', {
-            method: 'POST',
-            signal: controller.signal,
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({
-                url: url,
-                videoQuality: '720',
-            }),
-        });
-        clearTimeout(timer);
-        const data = await r.json();
-        if (data.url) return data.url;
-    } catch {}
+    const apis = [
+        // ۱: Cobalt رسمی
+        () => fetchJson('https://api.cobalt.tools/', {
+            url: url, videoQuality: '720',
+        }, {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        }, d => d.url),
 
-    // تلاش ۲: cobalt ws
-    try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 5000);
-        const r = await fetch('https://co.wuk.sh/api/json', {
-            method: 'POST',
-            signal: controller.signal,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, vQuality: '720' }),
-        });
-        clearTimeout(timer);
-        const data = await r.json();
-        if (data.url) return data.url;
-    } catch {}
+        // ۲: cobalt ws قدیمی
+        () => fetchJson('https://co.wuk.sh/api/json', {
+            url, vQuality: '720',
+        }, {
+            'Content-Type': 'application/json',
+        }, d => d.url),
+
+        // ۳: AllTube
+        async () => {
+            const r = await fetchWithTimeout(`https://alltubedownload.net/json?url=${encodeURIComponent(url)}`, 5000);
+            const d = await r.json();
+            return d.url || null;
+        },
+    ];
+
+    for (const api of apis) {
+        try {
+            const result = await api();
+            if (result) return result;
+        } catch {}
+    }
 
     return null;
+}
+
+// helper: fetch با تایم‌اوت
+async function fetchWithTimeout(url, ms, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+        const r = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        return r;
+    } catch (e) {
+        clearTimeout(timer);
+        throw e;
+    }
+}
+
+// helper: POST JSON و استخراج نتیجه
+async function fetchJson(url, body, headers, extract) {
+    const r = await fetchWithTimeout(url, 5000, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    return extract(d);
 }
