@@ -44,8 +44,12 @@ export default async function handler(req, res) {
 
         if (downloadUrl) {
             await editMsg(chatId, proc.message_id,
-                'لینک دانلود:\n' + downloadUrl
+                'لینک دانلود:\n' + downloadUrl + '\n\n⏳ این پیام بعد از ۳۰ ثانیه پاک می‌شه.'
             );
+            // پاک کردن پیام بعد از ۳۰ ثانیه
+            setTimeout(() => {
+                deleteMsg(chatId, proc.message_id);
+            }, 30000);
         } else {
             await editMsg(chatId, proc.message_id,
                 'لطفاً دوباره تلاش کنید.'
@@ -76,6 +80,17 @@ async function editMsg(chatId, msgId, text) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, message_id: msgId, text }),
     });
+}
+
+// پاک کردن پیام
+async function deleteMsg(chatId, msgId) {
+    try {
+        await fetch(`${TELEGRAM_API}/deleteMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, message_id: msgId }),
+        });
+    } catch {}
 }
 
 // API کوبالت برای دریافت لینک دانلود
