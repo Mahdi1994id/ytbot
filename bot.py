@@ -1,18 +1,14 @@
 import os
 import re
-from pyrogram import Client, filters
-from pyrogram.types import Message
 from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import yt_dlp
 
 # --- تنظیمات ---
 load_dotenv()
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 
 # الگوی تشخیص لینک یوتیوب
@@ -35,10 +31,6 @@ YDL_OPTS = {
 
 
 def get_download_info(url: str) -> dict | None:
-    """
-    لینک یوتیوب را می‌گیرد و اطلاعات دانلود برمی‌گرداند.
-    شامل: عنوان، فرمت، حجم و لینک مستقیم.
-    """
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -56,7 +48,6 @@ def get_download_info(url: str) -> dict | None:
 
 
 def format_size(size_bytes: int) -> str:
-    """تبدیل بایت به فرمت خوانا (MB / GB)"""
     if size_bytes >= 1_073_741_824:
         return f"{size_bytes / 1_073_741_824:.1f} GB"
     elif size_bytes >= 1_048_576:
@@ -67,7 +58,6 @@ def format_size(size_bytes: int) -> str:
 
 
 def format_duration(seconds: int) -> str:
-    """تبدیل ثانیه به فرمت ساعت:دقیقه:ثانیه"""
     if not seconds:
         return "نامشخص"
     m, s = divmod(int(seconds), 60)
@@ -77,9 +67,8 @@ def format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
-@app.on_message(filters.command("start"))
-async def start(client: Client, message: Message):
-    await message.reply_text(
+async def start(update: Update, context):
+    await update.message.reply_text(
         "سلام! \n"
         "من می‌توانم لینک یوتیوب را به لینک دانلود مستقیم تبدیل کنم.\n\n"
         "فرمت‌های پشتیبانی:\n"
@@ -91,21 +80,20 @@ async def start(client: Client, message: Message):
     )
 
 
-@app.on_message(filters.text & filters.private)
-async def downloader(client: Client, message: Message):
-    text = message.text.strip()
+async def downloader(update: Update, context):
+    text = update.message.text.strip()
     match = YT_REGEX.search(text)
 
     if not match:
         return
 
     url = match.group(0)
-    msg = await message.reply_text("در حال پردازش...\nلطفاً صبر کنید.")
+    msg = await update.message.reply_text("در حال پردازش...\nلطفاً صبر کنید.")
 
     info = get_download_info(url)
 
     if not info or not info["url"]:
-        await msg.edit("لطفاً دوباره تلاش کنید.")
+        await msg.edit_text("لطفاً دوباره تلاش کنید.")
         return
 
     size_str = format_size(info["filesize"])
@@ -119,8 +107,16 @@ async def downloader(client: Client, message: Message):
         f"لینک دانلود:\n{info['url']}"
     )
 
-    await msg.edit(response)
+    await msg.edit_text(response)
 
 
-print("در حال اجرای ربات...")
-app.run()
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader))
+    print("در حال اجرای ربات...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()

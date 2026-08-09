@@ -1,4 +1,3 @@
-pyrogram
-requests
+python-telegram-bot
 yt-dlp
 python-dotenv
