@@ -9,6 +9,10 @@ const FB_RE   = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:vi
 
 const PIPED_HOSTS = [
     'https://api.piped.private.coffee',
+    'https://pipedapi.r4fo.xyz',
+    'https://pipedapi.adminforge.de',
+    'https://pipedapi.in.projectsegfau.lt',
+    'https://pipedapi.privacyredirect.com',
     'https://pipedapi.ducks.party',
     'https://pipedapi.kavin.rocks',
 ];
