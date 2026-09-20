@@ -1,7 +1,10 @@
 {
   "functions": {
-    "api/**/*.js": {
+    "api/webhook.js": {
       "maxDuration": 10
+    },
+    "api/dl.js": {
+      "maxDuration": 60
     }
   }
 }

@@ -1,4 +1,4 @@
-import { TOKEN, TELEGRAM_API } from '../config.js';
+import { TOKEN, TELEGRAM_API, BASE_URL } from '../config.js';
 
 // ── پلتفرم‌ها و الگوهای لینک ────────────────────────────────────────────────
 const YT_RE   = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i;
@@ -11,7 +11,6 @@ const PIPED_HOSTS = [
     'https://api.piped.private.coffee',
     'https://pipedapi.r4fo.xyz',
     'https://pipedapi.adminforge.de',
-    'https://pipedapi.in.projectsegfau.lt',
     'https://pipedapi.privacyredirect.com',
     'https://pipedapi.ducks.party',
     'https://pipedapi.kavin.rocks',
@@ -66,7 +65,16 @@ export default async function handler(req, res) {
         // اول سعی کن خود ویدیو رو بفرست؛ نشد لینک بده
         const sent = await sendVideo(chatId, link.url, link.title);
         if (!sent) {
-            await sendMsg(chatId, '🔗 لینک دانلود مستقیم:\n' + link.url);
+            // If direct sendVideo failed (e.g. googlevideo 403), try proxy through dl.js
+            if (kind === 'youtube' && link.videoId) {
+                const proxyUrl = `${BASE_URL}/api/dl?v=${link.videoId}`;
+                const proxySent = await sendVideo(chatId, proxyUrl, link.title);
+                if (proxySent) return res.status(200).send('ok');
+                // Proxy also failed, send download link
+                await sendMsg(chatId, `🔗 دانلود پروکسی:\n${proxyUrl}`);
+            } else {
+                await sendMsg(chatId, '🔗 لینک دانلود مستقیم:\n' + link.url);
+            }
         }
     } catch (err) {
         console.error('Error:', err);
@@ -77,21 +85,39 @@ export default async function handler(req, res) {
 }
 
 // ── یوتیوب از طریق Piped ────────────────────────────────────────────────────
+// ترجیح: ۱) proxy URL (بدون IP-lock)  ۲) googlevideo مستقیم  ۳) dl.js proxy
 async function getYouTube(videoId) {
     for (const host of PIPED_HOSTS) {
         try {
             const r = await fetchWithTimeout(`${host}/streams/${videoId}`, 10000);
             if (!r.ok) continue;
             const data = await r.json();
-            const streams = (data.videoStreams || [])
+            const allStreams = (data.videoStreams || [])
                 .filter(s => s.mimeType && s.mimeType.startsWith('video/') && s.url)
                 .filter(s => !s.quality || s.quality === 'unknown' || parseInt(s.quality) <= 1080);
-            if (!streams.length) continue;
-            // ترجیح mp4 و کیفیت مناسب تلگرام
-            const mp4 = streams.filter(s => (s.mimeType || '').includes('mp4'));
-            const pick = (mp4.length ? mp4 : streams)
+            if (!allStreams.length) continue;
+
+            // ── اولویت ۱: Piped proxy URL (از سرور Piped عبور می‌کنه، بدون IP-lock) ──
+            const proxyStream = allStreams.find(s => s.url.includes('/proxy.'));
+            if (proxyStream) {
+                return { url: proxyStream.url, title: data.title, videoId, source: 'piped-proxy' };
+            }
+
+            // ── اولویت ۲: لینک غیر-googlevideo (مثل Odysee/LBRY) ──
+            const nonGv = allStreams.find(s =>
+                !s.url.includes('googlevideo') &&
+                !s.url.includes('odycdn') // Odysee نیاز به auth داره
+            );
+            if (nonGv) {
+                return { url: nonGv.url, title: data.title, videoId, source: 'piped-direct' };
+            }
+
+            // ── اولویت ۳: googlevideo مستقیم (احتمال 403 هست، ولی dl.js fallback داره) ──
+            const mp4 = allStreams.filter(s => (s.mimeType || '').includes('mp4'));
+            const pick = (mp4.length ? mp4 : allStreams)
                 .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-            return { url: pick.url, title: data.title };
+            return { url: pick.url, title: data.title, videoId, source: 'piped-gv' };
+
         } catch { /* سراغ بعدی */ }
     }
     return null;
@@ -164,8 +190,12 @@ async function sendVideo(chatId, url, caption) {
             }),
         });
         const j = await r.json();
+        if (!j.ok) console.error('sendVideo fail:', j.description);
         return j.ok;
-    } catch { return false; }
+    } catch (e) {
+        console.error('sendVideo err:', e.message);
+        return false;
+    }
 }
 
 async function sendMsg(chatId, text) {
@@ -181,7 +211,7 @@ async function fetchWithTimeout(url, ms, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        return await fetch(url, { ...options, signal: controller.signal, redirect: 'follow' });
     } finally {
         clearTimeout(timer);
     }
