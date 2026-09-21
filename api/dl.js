@@ -1,7 +1,8 @@
 // YouTube video proxy - Node.js Runtime (NOT Edge)
 // Strategy 1: Piped Proxy URL (no IP-lock) → stream through Piped
-// Strategy 2: RapidAPI multi-quality retry → stream through Vercel
-// Strategy 3: Piped googlevideo URL → stream through Vercel (last resort)
+// Strategy 2: RapidAPI Social (all-in-one) → stream through Vercel
+// Strategy 3: RapidAPI ZM → stream through Vercel
+// Strategy 4: Piped googlevideo URL → stream through Vercel (last resort)
 
 import { RAPIDAPI_KEY } from '../config.js';
 
@@ -13,6 +14,9 @@ const PIPED_INSTANCES = [
     'pipedapi.ducks.party',
     'pipedapi.kavin.rocks',
 ];
+
+const RAPI_SOCIAL = 'all-in-one-social-media-video-downloader1.p.rapidapi.com';
+const RAPI_ZM     = 'zm-api.p.rapidapi.com';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -51,15 +55,23 @@ export default async function handler(req, res) {
             console.log('Piped proxy failed, trying next strategy...');
         }
 
-        // Strategy 2: RapidAPI with retry on 403 (try all quality levels)
-        const rapidUrls = await getRapidApiUrls(videoId);
-        for (const { url, source, quality } of rapidUrls) {
-            const result = await tryStream(res, url, fetchOptions, source);
+        // Strategy 2: RapidAPI Social (all-in-one)
+        const socialUrls = await getRapidAPISocialUrls(videoId);
+        for (const { url, quality } of socialUrls) {
+            const result = await tryStream(res, url, fetchOptions, 'rapi-social');
             if (result !== 'fail') return;
-            console.log(`RapidAPI ${quality}p failed (403), trying next quality...`);
+            console.log(`RapidAPI Social ${quality}p failed, trying next...`);
         }
 
-        // Strategy 3: Piped googlevideo URL as last resort
+        // Strategy 3: RapidAPI ZM
+        const zmUrls = await getRapidAPIZMUrls(videoId);
+        for (const { url, quality } of zmUrls) {
+            const result = await tryStream(res, url, fetchOptions, 'rapi-zm');
+            if (result !== 'fail') return;
+            console.log(`RapidAPI ZM ${quality}p failed, trying next...`);
+        }
+
+        // Strategy 4: Piped googlevideo URL as last resort
         const pipedGvUrl = await getPipedGooglevideoUrl(videoId);
         if (pipedGvUrl) {
             const result = await tryStream(res, pipedGvUrl, fetchOptions, 'piped-gv');
@@ -125,7 +137,6 @@ async function getPipedProxyUrl(videoId) {
             const data = await r.json();
             const allStreams = [...(data.videoStreams || []), ...(data.audioStreams || [])];
 
-            // Prefer proxy.piped URLs (they handle googlevideo IP-lock)
             const proxyStream = allStreams.find(s => s.url && s.url.includes('/proxy.'));
             if (proxyStream) return proxyStream.url;
 
@@ -161,18 +172,55 @@ async function getPipedGooglevideoUrl(videoId) {
     return null;
 }
 
-// ─── RapidAPI: get ALL video URLs (multiple qualities for retry on 403) ───
-async function getRapidApiUrls(videoId) {
+// ─── RapidAPI Social: all-in-one-social-media-video-downloader1 ───
+async function getRapidAPISocialUrls(videoId) {
     const urls = [];
-
-    // API 2 first (zm-api)
     try {
+        const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
         const r = await fetch(
-            `https://zm-api.p.rapidapi.com/v1/social/autolink?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`,
+            `https://${RAPI_SOCIAL}/download?url=${encodeURIComponent(ytUrl)}`,
             {
                 signal: AbortSignal.timeout(15000),
                 headers: {
-                    'x-rapidapi-host': 'zm-api.p.rapidapi.com',
+                    'Content-Type': 'application/json',
+                    'x-rapidapi-host': RAPI_SOCIAL,
+                    'x-rapidapi-key': RAPIDAPI_KEY,
+                },
+            }
+        );
+        if (r.ok) {
+            const data = await r.json();
+            if (data.qualities?.length) {
+                const videos = data.qualities
+                    .filter(q => q.type === 'video' && q.download_url)
+                    .sort((a, b) => {
+                        const pref = [720, 480, 360, 240, 1080];
+                        const qa = parseInt(a.quality) || 0;
+                        const qb = parseInt(b.quality) || 0;
+                        return (pref.indexOf(qa) === -1 ? 99 : pref.indexOf(qa)) -
+                               (pref.indexOf(qb) === -1 ? 99 : pref.indexOf(qb));
+                    });
+                for (const v of videos) {
+                    urls.push({ url: v.download_url, quality: parseInt(v.quality) || 0 });
+                }
+            }
+        }
+    } catch (e) {
+        console.error('RapidAPI Social err:', e.message);
+    }
+    return urls;
+}
+
+// ─── RapidAPI ZM: zm-api ───
+async function getRapidAPIZMUrls(videoId) {
+    const urls = [];
+    try {
+        const r = await fetch(
+            `https://${RAPI_ZM}/v1/social/autolink?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`,
+            {
+                signal: AbortSignal.timeout(15000),
+                headers: {
+                    'x-rapidapi-host': RAPI_ZM,
                     'x-rapidapi-key': RAPIDAPI_KEY,
                 },
             }
@@ -189,42 +237,12 @@ async function getRapidApiUrls(videoId) {
                         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
                     });
                 for (const v of videos) {
-                    urls.push({ url: v.url, source: 'api2', quality: v.height || 0 });
+                    urls.push({ url: v.url, quality: v.height || 0 });
                 }
             }
         }
     } catch (e) {
-        console.error('API2 err:', e.message);
+        console.error('RapidAPI ZM err:', e.message);
     }
-
-    // API 1 (social-download-all-in-one) - fallback
-    if (urls.length === 0) {
-        try {
-            const r = await fetch('https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink', {
-                method: 'POST',
-                signal: AbortSignal.timeout(15000),
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-rapidapi-host': 'social-download-all-in-one.p.rapidapi.com',
-                    'x-rapidapi-key': RAPIDAPI_KEY,
-                },
-                body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${videoId}` }),
-            });
-            if (r.ok) {
-                const data = await r.json();
-                if (!data.error && data.medias?.length) {
-                    const videos = data.medias
-                        .filter(m => m.type === 'video' && m.ext === 'mp4' && m.url)
-                        .sort((a, b) => (b.height || 0) - (a.height || 0));
-                    for (const v of videos) {
-                        urls.push({ url: v.url, source: 'api1', quality: v.height || 0 });
-                    }
-                }
-            }
-        } catch (e) {
-            console.error('API1 err:', e.message);
-        }
-    }
-
     return urls;
 }
