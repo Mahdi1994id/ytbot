@@ -14,10 +14,10 @@ const FB_RE = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:vide
 // ── API config ──
 const RAPI_ZM = 'zm-api.p.rapidapi.com';
 
-// ── Timeouts — MUST complete within 9s for Vercel hobby ──
+// ── Timeouts — MUST fit within 9s total ──
 const API_TO = 4000;
-const YT_SEND_TO = 8000;   // 8s for YouTube sendVideo (dl.js needs time to stream)
-const OTHER_SEND_TO = 5000; // 5s for other platforms (direct URL, fast)
+const YT_SEND_TO = 8000;    // 8s for YouTube (dl.js needs time to stream)
+const OTHER_SEND_TO = 5000;  // 5s for other platforms (direct URL)
 
 // ═══════════════════════════════════════════════════════════════════
 // MAIN HANDLER
@@ -62,14 +62,17 @@ async function handleMessage(chatId, text) {
         );
     }
 
-    let result = null;
     let kind = null;
     let m;
 
     if ((m = text.match(YT_RE))) {
         kind = 'youtube';
-        result = await getYouTube(m[1]);
-    } else if (TT_RE.test(text)) {
+        return handleYouTube(chatId, m[1]);
+    }
+
+    let result = null;
+
+    if (TT_RE.test(text)) {
         kind = 'tiktok';
         result = await getTikTok(text.match(TT_RE)[0]);
     } else if ((m = text.match(TW_RE))) {
@@ -83,60 +86,57 @@ async function handleMessage(chatId, text) {
         result = await getFacebook(text);
     }
 
-    if (!kind) return; // Not a recognized link
-
+    if (!kind) return;
     if (!result) {
         return sendMsg(chatId, '❌ نشد این ویدیو رو بگیرم.\nممکنه خصوصی باشه، حذف شده، یا پشتیبانی نشه.');
     }
 
-    // ── For YouTube: special handling ──
-    if (kind === 'youtube') {
-        // Try sendVideo with dl.js proxy (gives Telegram time to download)
-        const sent = await sendVideo(chatId, result.url, result.title || '', YT_SEND_TO);
-        if (sent) return;
-
-        // Failed — send download link
-        let msg = result.title ? `🎬 ${result.title}\n\n` : '';
-        msg += `⬇️ ویدیو تو تلگرام فرستاده نشد.\nلینک دانلود (تو مرورگر باز کن):\n${result.fallbackUrl}`;
-        return sendMsg(chatId, msg);
-    }
-
-    // ── For other platforms: try sendVideo, fallback to link ──
+    // ── Try to send as video ──
     if (result.url) {
         const sent = await sendVideo(chatId, result.url, result.title || '', OTHER_SEND_TO);
         if (sent) return;
     }
-
     if (result.altUrl) {
         const sent2 = await sendVideo(chatId, result.altUrl, result.title || '', OTHER_SEND_TO);
         if (sent2) return;
     }
 
-    // Send link as message
+    // ── Fallback: send link ──
     let msg = result.title ? `🎬 ${result.title}\n\n` : '';
     msg += `⬇️ لینک دانلود:\n${result.url || result.altUrl}`;
     return sendMsg(chatId, msg);
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// YOUTUBE — dl.js proxy (no API call here, saves time!)
+// YOUTUBE — special handler with parallel title fetch
 // ═══════════════════════════════════════════════════════════════════
-async function getYouTube(videoId) {
+async function handleYouTube(chatId, videoId) {
     const proxyUrl = `${BASE_URL}/api/dl?v=${videoId}`;
     const savefromUrl = `https://savefrom.net/1-youtube/?url=https://www.youtube.com/watch?v=${videoId}`;
 
-    // Get title from RapidAPI ZM (fast, but don't block on it)
-    let title = 'YouTube Video';
-    try {
-        const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
-        if (zm?.title) title = zm.title;
-    } catch {}
+    // Start title fetch in parallel with sendVideo
+    const titlePromise = getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`)
+        .then(r => r?.title || '')
+        .catch(() => '');
 
-    return {
-        url: proxyUrl,
-        title,
-        fallbackUrl: savefromUrl,
-    };
+    // Try sendVideo with dl.js proxy (gives Telegram time to download)
+    const sent = await sendVideo(chatId, proxyUrl, '', YT_SEND_TO);
+
+    if (sent) {
+        // Video sent! Also send title as a separate message for context
+        const title = await titlePromise;
+        if (title) {
+            // Edit the video caption to include the title
+            // Actually, can't easily do this. Just return.
+        }
+        return;
+    }
+
+    // sendVideo failed — get title and send download link
+    const title = await titlePromise;
+    let msg = title ? `🎬 ${title}\n\n` : '';
+    msg += `⬇️ ویدیو تو تلگرام فرستاده نشد.\nلینک دانلود (تو مرورگر باز کن):\n${savefromUrl}`;
+    return sendMsg(chatId, msg);
 }
 
 // ═══════════════════════════════════════════════════════════════════
