@@ -23,7 +23,12 @@ const OTHER_SEND_TO = 5000;  // 5s for other platforms (direct URL)
 // MAIN HANDLER
 // ═══════════════════════════════════════════════════════════════════
 export default async function handler(req, res) {
-    if (req.method === 'GET') return res.status(200).send('alive');
+    if (req.method === 'GET') {
+        // Debug: check if TOKEN is set
+        const tokenSet = !!TOKEN;
+        const apiPrefix = TELEGRAM_API ? TELEGRAM_API.substring(0, 30) : 'UNDEFINED';
+        return res.status(200).json({ alive: true, tokenSet, apiPrefix });
+    }
     if (req.method !== 'POST') return res.status(405).send('no');
 
     const message = req.body?.message;
