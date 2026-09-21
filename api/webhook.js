@@ -14,9 +14,10 @@ const FB_RE = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:vide
 // ── API config ──
 const RAPI_ZM = 'zm-api.p.rapidapi.com';
 
-// ── Timeouts (MUST complete within 9s total for Vercel hobby plan) ──
-const API_TO = 4000;   // 4s for external API calls
-const TG_TO  = 5000;   // 5s for Telegram sendVideo (needs time to attempt download)
+// ── Timeouts — MUST complete within 9s for Vercel hobby ──
+const API_TO = 4000;
+const YT_SEND_TO = 8000;   // 8s for YouTube sendVideo (dl.js needs time to stream)
+const OTHER_SEND_TO = 5000; // 5s for other platforms (direct URL, fast)
 
 // ═══════════════════════════════════════════════════════════════════
 // MAIN HANDLER
@@ -88,57 +89,58 @@ async function handleMessage(chatId, text) {
         return sendMsg(chatId, '❌ نشد این ویدیو رو بگیرم.\nممکنه خصوصی باشه، حذف شده، یا پشتیبانی نشه.');
     }
 
-    // ── Try to send as video ──
+    // ── For YouTube: special handling ──
+    if (kind === 'youtube') {
+        // Try sendVideo with dl.js proxy (gives Telegram time to download)
+        const sent = await sendVideo(chatId, result.url, result.title || '', YT_SEND_TO);
+        if (sent) return;
+
+        // Failed — send download link
+        let msg = result.title ? `🎬 ${result.title}\n\n` : '';
+        msg += `⬇️ ویدیو تو تلگرام فرستاده نشد.\nلینک دانلود (تو مرورگر باز کن):\n${result.fallbackUrl}`;
+        return sendMsg(chatId, msg);
+    }
+
+    // ── For other platforms: try sendVideo, fallback to link ──
     if (result.url) {
-        const sent = await sendVideo(chatId, result.url, result.title || '');
+        const sent = await sendVideo(chatId, result.url, result.title || '', OTHER_SEND_TO);
         if (sent) return;
     }
 
-    // ── Try alternative URL ──
     if (result.altUrl) {
-        const sent2 = await sendVideo(chatId, result.altUrl, result.title || '');
+        const sent2 = await sendVideo(chatId, result.altUrl, result.title || '', OTHER_SEND_TO);
         if (sent2) return;
     }
 
-    // ── Can't send as video — send info + download link ──
-    let msg = '';
-    if (result.title) msg += `🎬 ${result.title}\n\n`;
-
-    if (result.fallbackUrl) {
-        msg += `⬇️ لینک دانلود (تو مرورگر باز کن):\n${result.fallbackUrl}`;
-    } else if (result.url) {
-        msg += `⬇️ لینک دانلود:\n${result.url}`;
-    } else {
-        msg += '❌ نتونستم ویدیو رو بفرستم.';
-    }
-
+    // Send link as message
+    let msg = result.title ? `🎬 ${result.title}\n\n` : '';
+    msg += `⬇️ لینک دانلود:\n${result.url || result.altUrl}`;
     return sendMsg(chatId, msg);
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// YOUTUBE — try dl.js proxy, fallback to savefrom.net link
+// YOUTUBE — dl.js proxy (no API call here, saves time!)
 // ═══════════════════════════════════════════════════════════════════
 async function getYouTube(videoId) {
-    // Get video info from RapidAPI ZM (fast)
-    const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
-    const title = zm?.title || 'YouTube Video';
-
-    // Primary: dl.js proxy URL (streams through Vercel — works if Piped/RapidAPI are up)
     const proxyUrl = `${BASE_URL}/api/dl?v=${videoId}`;
-
-    // Fallback: savefrom.net link (works in user's browser)
     const savefromUrl = `https://savefrom.net/1-youtube/?url=https://www.youtube.com/watch?v=${videoId}`;
 
+    // Get title from RapidAPI ZM (fast, but don't block on it)
+    let title = 'YouTube Video';
+    try {
+        const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
+        if (zm?.title) title = zm.title;
+    } catch {}
+
     return {
-        url: proxyUrl,                        // Try sending via proxy first
-        altUrl: null,                          // No alt direct URL (IP-locked anyway)
+        url: proxyUrl,
         title,
-        fallbackUrl: savefromUrl,              // If video can't be sent, give download link
+        fallbackUrl: savefromUrl,
     };
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// TIKTOK — tikwm (free, fast) → RapidAPI ZM
+// TIKTOK — tikwm → RapidAPI ZM
 // ═══════════════════════════════════════════════════════════════════
 async function getTikTok(url) {
     try {
@@ -162,7 +164,7 @@ async function getTikTok(url) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// TWITTER/X — fxtwitter (free, fast) → RapidAPI ZM
+// TWITTER/X — fxtwitter → RapidAPI ZM
 // ═══════════════════════════════════════════════════════════════════
 async function getTwitter(id) {
     try {
@@ -260,9 +262,9 @@ async function getFromRapidAPIZM(url) {
 // ═══════════════════════════════════════════════════════════════════
 // TELEGRAM HELPERS
 // ═══════════════════════════════════════════════════════════════════
-async function sendVideo(chatId, url, caption) {
+async function sendVideo(chatId, url, caption, timeoutMs) {
     try {
-        const r = await fetchTimeout(`${TELEGRAM_API}/sendVideo`, TG_TO, {
+        const r = await fetchTimeout(`${TELEGRAM_API}/sendVideo`, timeoutMs || OTHER_SEND_TO, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
