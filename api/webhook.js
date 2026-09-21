@@ -67,9 +67,14 @@ export default async function handler(req, res) {
         const sent = await sendVideo(chatId, link.url, link.title);
         if (!sent) {
             // sendVideo ناموفق بود
-            if (kind === 'youtube') {
-                // برای یوتوب: لینک پروکسی بده که کاربر بتونه تو مرورگر باز کنه
-                await sendMsg(chatId, '⬇️ لینک دانلود (تو مرورگر باز کن):\n' + link.url);
+            if (kind === 'youtube' && link.origUrl) {
+                // برای یوتوب: از RapidAPI ZM لینک مستقیم بگیر (تو مرورگر کار می‌کنه)
+                const zmResult = await getFromRapidAPIZM(link.origUrl);
+                if (zmResult) {
+                    await sendMsg(chatId, '⬇️ ویدیو تو تلگرام فرستاده نشد، ولی این لینک تو مرورگر کار می‌کنه:\n' + zmResult.url);
+                } else {
+                    await sendMsg(chatId, '⬇️ لینک دانلود (تو مرورگر باز کن):\n' + link.url);
+                }
             } else {
                 await sendMsg(chatId, '🔗 لینک دانلود:\n' + link.url);
             }
@@ -83,14 +88,12 @@ export default async function handler(req, res) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// یوتیوب — سریع: dl.js proxy URL (تلگرام خودش دانلود می‌کنه)
+// یوتیوب — dl.js proxy URL (تلگرام خودش دانلود می‌کنه)
+// اگر fail شد، RapidAPI ZM یک googlevideo مستقیم می‌ده (تو مرورگر کار می‌کنه)
 // ══════════════════════════════════════════════════════════════════════════════
 async function getYouTube(videoId) {
-    // ── استراتژی ۱ (سریع): dl.js پروکسی — تلگرام مستقیم از dl.js دانلود می‌کنه ──
-    // dl.js خودش استراتژی‌های Piped proxy → RapidAPI → googlevideo رو امتحان می‌کنه
-    // این خیلی سریعه چون هیچ دانلودی اینجا انجام نمیشه
     const proxyUrl = `${BASE_URL}/api/dl?v=${videoId}`;
-    return { url: proxyUrl, title: 'YouTube Video', videoId, source: 'dl-proxy' };
+    return { url: proxyUrl, title: 'YouTube Video', videoId, source: 'dl-proxy', origUrl: `https://www.youtube.com/watch?v=${videoId}` };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
