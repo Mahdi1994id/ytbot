@@ -1,5 +1,6 @@
 // Telegram webhook handler — multi-platform video downloader
 // Platforms: YouTube, TikTok, Twitter/X, Instagram, Facebook
+// CRITICAL: Must always respond within 9s to avoid Vercel 504 timeout
 
 import { TOKEN, TELEGRAM_API, RAPIDAPI_KEY, BASE_URL } from '../config.js';
 
@@ -13,9 +14,9 @@ const FB_RE = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:vide
 // ── API config ──
 const RAPI_ZM = 'zm-api.p.rapidapi.com';
 
-// ── Timeouts (aggressive — must complete within 9s total) ──
+// ── Timeouts (MUST complete within 9s total for Vercel hobby plan) ──
 const API_TO = 4000;   // 4s for external API calls
-const TG_TO  = 4000;   // 4s for Telegram sendVideo
+const TG_TO  = 5000;   // 5s for Telegram sendVideo (needs time to attempt download)
 
 // ═══════════════════════════════════════════════════════════════════
 // MAIN HANDLER
@@ -30,12 +31,11 @@ export default async function handler(req, res) {
     const chatId = message.chat.id;
     const text = (message.text || message.caption || '').trim();
 
-    // Process message — always respond within 9s
     try {
         await handleMessage(chatId, text);
     } catch (err) {
         console.error('Handler error:', err?.message || err);
-        try { await sendMsg(chatId, '❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.'); } catch {}
+        try { await sendMsg(chatId, '❌ خطایی رخ داد. دوباره تلاش کنید.'); } catch {}
     }
 
     return res.status(200).send('ok');
@@ -47,7 +47,6 @@ export default async function handler(req, res) {
 async function handleMessage(chatId, text) {
     if (!text) return;
 
-    // /start command
     if (text === '/start') {
         return sendMsg(chatId,
             'سلام! 👋\n' +
@@ -62,7 +61,6 @@ async function handleMessage(chatId, text) {
         );
     }
 
-    // Detect platform and get download info
     let result = null;
     let kind = null;
     let m;
@@ -84,46 +82,58 @@ async function handleMessage(chatId, text) {
         result = await getFacebook(text);
     }
 
-    // Not a recognized link
-    if (!kind) return;
+    if (!kind) return; // Not a recognized link
 
-    // No result — couldn't get video
     if (!result) {
         return sendMsg(chatId, '❌ نشد این ویدیو رو بگیرم.\nممکنه خصوصی باشه، حذف شده، یا پشتیبانی نشه.');
     }
 
     // ── Try to send as video ──
-    const sent = await sendVideo(chatId, result.url, result.title || '');
+    if (result.url) {
+        const sent = await sendVideo(chatId, result.url, result.title || '');
+        if (sent) return;
+    }
 
-    if (!sent && result.altUrl) {
-        // Try alternative URL (e.g., dl.js proxy for YouTube)
+    // ── Try alternative URL ──
+    if (result.altUrl) {
         const sent2 = await sendVideo(chatId, result.altUrl, result.title || '');
         if (sent2) return;
     }
 
-    if (!sent) {
-        // Can't send as video — send link
-        let msg = '';
-        if (result.title) msg += `🎬 ${result.title}\n\n`;
+    // ── Can't send as video — send info + download link ──
+    let msg = '';
+    if (result.title) msg += `🎬 ${result.title}\n\n`;
+
+    if (result.fallbackUrl) {
+        msg += `⬇️ لینک دانلود (تو مرورگر باز کن):\n${result.fallbackUrl}`;
+    } else if (result.url) {
         msg += `⬇️ لینک دانلود:\n${result.url}`;
-        return sendMsg(chatId, msg);
+    } else {
+        msg += '❌ نتونستم ویدیو رو بفرستم.';
     }
+
+    return sendMsg(chatId, msg);
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// YOUTUBE — dl.js proxy (streams through Vercel with fresh IP)
+// YOUTUBE — try dl.js proxy, fallback to savefrom.net link
 // ═══════════════════════════════════════════════════════════════════
 async function getYouTube(videoId) {
+    // Get video info from RapidAPI ZM (fast)
+    const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
+    const title = zm?.title || 'YouTube Video';
+
+    // Primary: dl.js proxy URL (streams through Vercel — works if Piped/RapidAPI are up)
     const proxyUrl = `${BASE_URL}/api/dl?v=${videoId}`;
 
-    // Also try RapidAPI ZM to get title + direct URL (for fallback link)
-    const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
+    // Fallback: savefrom.net link (works in user's browser)
+    const savefromUrl = `https://savefrom.net/1-youtube/?url=https://www.youtube.com/watch?v=${videoId}`;
 
     return {
-        url: proxyUrl,                    // Primary: dl.js proxy (best chance)
-        altUrl: zm?.url || null,           // Alt: direct googlevideo URL (may fail)
-        title: zm?.title || 'YouTube Video',
-        source: 'dl-proxy',
+        url: proxyUrl,                        // Try sending via proxy first
+        altUrl: null,                          // No alt direct URL (IP-locked anyway)
+        title,
+        fallbackUrl: savefromUrl,              // If video can't be sent, give download link
     };
 }
 
@@ -131,7 +141,6 @@ async function getYouTube(videoId) {
 // TIKTOK — tikwm (free, fast) → RapidAPI ZM
 // ═══════════════════════════════════════════════════════════════════
 async function getTikTok(url) {
-    // tikwm
     try {
         const r = await fetchTimeout(
             'https://www.tikwm.com/api/?url=' + encodeURIComponent(url) + '&hd=1',
@@ -149,7 +158,6 @@ async function getTikTok(url) {
         }
     } catch {}
 
-    // RapidAPI ZM fallback
     return await getFromRapidAPIZM(url);
 }
 
@@ -232,7 +240,6 @@ async function getFromRapidAPIZM(url) {
         const videos = data.medias
             .filter(m => m.type === 'video' && m.url)
             .sort((a, b) => {
-                // Prefer: 360p/480p with audio in mp4 (small, compatible, has audio)
                 const pref = [360, 480, 720, 240, 1080];
                 const ai = pref.indexOf(a.height);
                 const bi = pref.indexOf(b.height);
