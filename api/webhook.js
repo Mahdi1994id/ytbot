@@ -1,22 +1,25 @@
+// Telegram webhook handler — multi-platform video downloader
+// Platforms: YouTube, TikTok, Twitter/X, Instagram, Facebook
+
 import { TOKEN, TELEGRAM_API, RAPIDAPI_KEY, BASE_URL } from '../config.js';
 
-// ── پلتفرم‌ها و الگوهای لینک ────────────────────────────────────────────────
-const YT_RE   = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i;
-const TT_RE   = /(?:https?:\/\/)?[\w.-]*tiktok\.com\/[^\s"'<>]+/i;
-const TW_RE   = /(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/i;
-const IG_RE   = /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv)\/([\w-]+)/i;
-const FB_RE   = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:videos\/(\d+)|watch\/?\?v=(\d+)|share\/v\/([\w-]+))/i;
+// ── Platform regex ──
+const YT_RE = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i;
+const TT_RE = /(?:https?:\/\/)?[\w.-]*tiktok\.com\/[^\s"'<>]+/i;
+const TW_RE = /(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/i;
+const IG_RE = /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv)\/([\w-]+)/i;
+const FB_RE = /(?:https?:\/\/)?(?:www\.|m\.|web\.)?facebook\.com\/[^\s]*?(?:videos\/(\d+)|watch\/?\?v=(\d+)|share\/v\/([\w-]+))/i;
 
-const PIPED_HOSTS = [
-    'https://api.piped.private.coffee',
-    'https://pipedapi.r4fo.xyz',
-    'https://pipedapi.adminforge.de',
-];
+// ── API config ──
+const RAPI_ZM = 'zm-api.p.rapidapi.com';
 
-const RAPI_SOCIAL = 'all-in-one-social-media-video-downloader1.p.rapidapi.com';
-const RAPI_ZM     = 'zm-api.p.rapidapi.com';
+// ── Timeouts (aggressive — must complete within 9s total) ──
+const API_TO = 4000;   // 4s for external API calls
+const TG_TO  = 4000;   // 4s for Telegram sendVideo
 
-// ── هندلر اصلی ──────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// MAIN HANDLER
+// ═══════════════════════════════════════════════════════════════════
 export default async function handler(req, res) {
     if (req.method === 'GET') return res.status(200).send('alive');
     if (req.method !== 'POST') return res.status(405).send('no');
@@ -25,151 +28,194 @@ export default async function handler(req, res) {
     if (!message) return res.status(200).send('ok');
 
     const chatId = message.chat.id;
-    const text = message.text || message.caption || '';
+    const text = (message.text || message.caption || '').trim();
 
+    // Process message — always respond within 9s
     try {
-        if (text === '/start') {
-            await sendMsg(chatId,
-                'سلام! 👋\n' +
-                'لینک ویدیو بفرست تا خودِ ویدیو رو برات بفرستم.\n\n' +
-                'پلتفرم‌های پشتیبانی‌شده:\n' +
-                '  ▶️ یوتیوب (ویدیو و شورتس)\n' +
-                '  🎵 تیک‌تاک\n' +
-                '  🐦 توییتر / X\n' +
-                '  📷 اینستاگرام\n' +
-                '  📘 فیس‌بوک\n\n' +
-                '⚠️ ویدیوهای خیلی طولانی/سنگین رو لینک مستقیم می‌دم.'
-            );
-            return res.status(200).send('ok');
-        }
-
-        let link = null, kind = null, origUrl = text;
-
-        let m = text.match(YT_RE);
-        if (m) { kind = 'youtube'; link = await getYouTube(m[1]); }
-
-        if (!link && TT_RE.test(text)) { kind = 'tiktok'; link = await getTikTok(text.match(TT_RE)[0]); }
-
-        if (!link && (m = text.match(TW_RE))) { kind = 'twitter'; link = await getTwitter(m[1]); }
-
-        if (!link && (m = text.match(IG_RE))) { kind = 'instagram'; link = await getInstagram(m[1], origUrl); }
-
-        if (!link && (m = text.match(FB_RE))) { kind = 'facebook'; link = await getFacebook(origUrl); }
-
-        if (!kind) return res.status(200).send('ok');
-
-        if (!link) {
-            await sendMsg(chatId, '❌ نشد این ویدیو رو بگیرم. احتمالاً خصوصیه، حذف شده، یا فرمتش پشتیبانی نمی‌شه.');
-            return res.status(200).send('ok');
-        }
-
-        // سعی کن خود ویدیو رو بفرست
-        const sent = await sendVideo(chatId, link.url, link.title);
-        if (!sent) {
-            // sendVideo ناموفق بود
-            if (kind === 'youtube' && link.origUrl) {
-                // برای یوتوب: از RapidAPI ZM لینک مستقیم بگیر (تو مرورگر کار می‌کنه)
-                const zmResult = await getFromRapidAPIZM(link.origUrl);
-                if (zmResult) {
-                    await sendMsg(chatId, '⬇️ ویدیو تو تلگرام فرستاده نشد، ولی این لینک تو مرورگر کار می‌کنه:\n' + zmResult.url);
-                } else {
-                    await sendMsg(chatId, '⬇️ لینک دانلود (تو مرورگر باز کن):\n' + link.url);
-                }
-            } else {
-                await sendMsg(chatId, '🔗 لینک دانلود:\n' + link.url);
-            }
-        }
+        await handleMessage(chatId, text);
     } catch (err) {
-        console.error('Error:', err);
-        try { await sendMsg(chatId, 'خطایی رخ داد. لطفاً دوباره تلاش کنید.'); } catch {}
+        console.error('Handler error:', err?.message || err);
+        try { await sendMsg(chatId, '❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.'); } catch {}
     }
 
-    res.status(200).send('ok');
+    return res.status(200).send('ok');
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// یوتیوب — dl.js proxy URL (تلگرام خودش دانلود می‌کنه)
-// اگر fail شد، RapidAPI ZM یک googlevideo مستقیم می‌ده (تو مرورگر کار می‌کنه)
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// MESSAGE ROUTER
+// ═══════════════════════════════════════════════════════════════════
+async function handleMessage(chatId, text) {
+    if (!text) return;
+
+    // /start command
+    if (text === '/start') {
+        return sendMsg(chatId,
+            'سلام! 👋\n' +
+            'لینک ویدیو بفرست تا برات بفرستم.\n\n' +
+            'پلتفرم‌ها:\n' +
+            '  ▶️ یوتیوب\n' +
+            '  🎵 تیک‌تاک\n' +
+            '  🐦 توییتر / X\n' +
+            '  📷 اینستاگرام\n' +
+            '  📘 فیس‌بوک\n\n' +
+            '⚠️ ویدیوهای خیلی طولانی رو لینک دانلود میدم.'
+        );
+    }
+
+    // Detect platform and get download info
+    let result = null;
+    let kind = null;
+    let m;
+
+    if ((m = text.match(YT_RE))) {
+        kind = 'youtube';
+        result = await getYouTube(m[1]);
+    } else if (TT_RE.test(text)) {
+        kind = 'tiktok';
+        result = await getTikTok(text.match(TT_RE)[0]);
+    } else if ((m = text.match(TW_RE))) {
+        kind = 'twitter';
+        result = await getTwitter(m[1]);
+    } else if ((m = text.match(IG_RE))) {
+        kind = 'instagram';
+        result = await getInstagram(m[1], text);
+    } else if (FB_RE.test(text)) {
+        kind = 'facebook';
+        result = await getFacebook(text);
+    }
+
+    // Not a recognized link
+    if (!kind) return;
+
+    // No result — couldn't get video
+    if (!result) {
+        return sendMsg(chatId, '❌ نشد این ویدیو رو بگیرم.\nممکنه خصوصی باشه، حذف شده، یا پشتیبانی نشه.');
+    }
+
+    // ── Try to send as video ──
+    const sent = await sendVideo(chatId, result.url, result.title || '');
+
+    if (!sent && result.altUrl) {
+        // Try alternative URL (e.g., dl.js proxy for YouTube)
+        const sent2 = await sendVideo(chatId, result.altUrl, result.title || '');
+        if (sent2) return;
+    }
+
+    if (!sent) {
+        // Can't send as video — send link
+        let msg = '';
+        if (result.title) msg += `🎬 ${result.title}\n\n`;
+        msg += `⬇️ لینک دانلود:\n${result.url}`;
+        return sendMsg(chatId, msg);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// YOUTUBE — dl.js proxy (streams through Vercel with fresh IP)
+// ═══════════════════════════════════════════════════════════════════
 async function getYouTube(videoId) {
     const proxyUrl = `${BASE_URL}/api/dl?v=${videoId}`;
-    return { url: proxyUrl, title: 'YouTube Video', videoId, source: 'dl-proxy', origUrl: `https://www.youtube.com/watch?v=${videoId}` };
+
+    // Also try RapidAPI ZM to get title + direct URL (for fallback link)
+    const zm = await getFromRapidAPIZM(`https://www.youtube.com/watch?v=${videoId}`);
+
+    return {
+        url: proxyUrl,                    // Primary: dl.js proxy (best chance)
+        altUrl: zm?.url || null,           // Alt: direct googlevideo URL (may fail)
+        title: zm?.title || 'YouTube Video',
+        source: 'dl-proxy',
+    };
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// تیک‌تاک — tikwm (رایگان، سریع) → RapidAPI ZM
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// TIKTOK — tikwm (free, fast) → RapidAPI ZM
+// ═══════════════════════════════════════════════════════════════════
 async function getTikTok(url) {
-    // ── استراتژی ۱: tikwm (رایگان، سریع) ──
+    // tikwm
     try {
-        const r = await fetchWithTimeout(
-            'https://www.tikwm.com/api/?url=' + encodeURIComponent(url) + '&hd=1', 8000);
+        const r = await fetchTimeout(
+            'https://www.tikwm.com/api/?url=' + encodeURIComponent(url) + '&hd=1',
+            API_TO
+        );
         const data = await r.json();
         if (data.code === 0 && data.data) {
             const v = data.data.hdplay || data.data.play;
-            if (v) return { url: v.startsWith('http') ? v : 'https://www.tikwm.com' + v, title: data.data.title };
+            if (v) {
+                return {
+                    url: v.startsWith('http') ? v : 'https://www.tikwm.com' + v,
+                    title: data.data.title || 'TikTok',
+                };
+            }
         }
     } catch {}
 
-    // ── استراتژی ۲: RapidAPI ZM ──
+    // RapidAPI ZM fallback
     return await getFromRapidAPIZM(url);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// توییتر/X — fxtwitter (رایگان، سریع) → RapidAPI ZM
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// TWITTER/X — fxtwitter (free, fast) → RapidAPI ZM
+// ═══════════════════════════════════════════════════════════════════
 async function getTwitter(id) {
     try {
-        const r = await fetchWithTimeout(`https://api.fxtwitter.com/status/${id}`, 6000);
+        const r = await fetchTimeout(`https://api.fxtwitter.com/status/${id}`, API_TO);
         const data = await r.json();
         const t = data.tweet;
-        if (!t) throw new Error('no tweet');
-        const vids = t.media?.videos || t.media?.all?.filter(x => x.type === 'video') || [];
-        if (vids.length) {
-            const best = vids.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-            return { url: best.url, title: (t.text || '').slice(0, 80) };
+        if (t) {
+            const vids = t.media?.videos || [];
+            if (vids.length) {
+                const best = vids.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+                return { url: best.url, title: (t.text || '').slice(0, 80) };
+            }
+            const photos = t.media?.photos || [];
+            if (photos.length) {
+                return { url: photos[0].url, title: (t.text || '').slice(0, 80) };
+            }
         }
-        const photos = t.media?.photos || [];
-        if (photos.length) return { url: photos[0].url, title: (t.text || '').slice(0, 80) };
     } catch {}
 
-    const url = `https://x.com/i/status/${id}`;
-    return await getFromRapidAPIZM(url);
+    return await getFromRapidAPIZM(`https://x.com/i/status/${id}`);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// اینستاگرام — embed scrape → RapidAPI ZM
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// INSTAGRAM — embed scrape → RapidAPI ZM
+// ═══════════════════════════════════════════════════════════════════
 async function getInstagram(code, origUrl) {
     try {
-        const r = await fetchWithTimeout(`https://www.instagram.com/reel/${code}/embed/captioned/`, 8000,
-            { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' } });
-        if (!r.ok) throw new Error('not ok');
-        const html = await r.text();
-        const m = html.match(/"video_url":"(https:[^"]+?)"/) || html.match(/(https:\\\/\\\/[^"]+?\.mp4[^"]*?)"/);
-        if (m) {
-            const url = m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-            return { url, title: 'اینستاگرام' };
+        const r = await fetchTimeout(
+            `https://www.instagram.com/reel/${code}/embed/captioned/`,
+            API_TO,
+            { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120' } }
+        );
+        if (r.ok) {
+            const html = await r.text();
+            const m = html.match(/"video_url":"(https:[^"]+?)"/)
+                   || html.match(/(https:\\\/\\\/[^"]+?\.mp4[^"]*?)"/);
+            if (m) {
+                const url = m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+                return { url, title: 'Instagram' };
+            }
         }
     } catch {}
 
     return await getFromRapidAPIZM(origUrl);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// فیس‌بوک — RapidAPI ZM
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// FACEBOOK — RapidAPI ZM
+// ═══════════════════════════════════════════════════════════════════
 async function getFacebook(origUrl) {
     return await getFromRapidAPIZM(origUrl);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// RapidAPI ZM (سریع — زیر ۱ ثانیه)
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// RapidAPI ZM — fast (<2s), supports all platforms
+// ═══════════════════════════════════════════════════════════════════
 async function getFromRapidAPIZM(url) {
     try {
-        const r = await fetchWithTimeout(
-            `https://${RAPI_ZM}/v1/social/autolink?url=${encodeURIComponent(url)}`, 8000,
+        const r = await fetchTimeout(
+            `https://${RAPI_ZM}/v1/social/autolink?url=${encodeURIComponent(url)}`,
+            API_TO,
             {
                 headers: {
                     'Content-Type': 'application/json',
@@ -186,26 +232,30 @@ async function getFromRapidAPIZM(url) {
         const videos = data.medias
             .filter(m => m.type === 'video' && m.url)
             .sort((a, b) => {
-                const pref = [720, 480, 360, 240, 1080];
+                // Prefer: 360p/480p with audio in mp4 (small, compatible, has audio)
+                const pref = [360, 480, 720, 240, 1080];
                 const ai = pref.indexOf(a.height);
                 const bi = pref.indexOf(b.height);
-                return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+                const aScore = (ai === -1 ? 99 : ai) + (a.is_audio ? 0 : 10) + (a.extension === 'mp4' ? 0 : 5);
+                const bScore = (bi === -1 ? 99 : bi) + (b.is_audio ? 0 : 10) + (b.extension === 'mp4' ? 0 : 5);
+                return aScore - bScore;
             });
+
         if (videos.length) {
             return { url: videos[0].url, title, source: 'rapi-zm' };
         }
     } catch (e) {
-        console.error('RapidAPI ZM err:', e.message);
+        console.error('RapidAPI ZM err:', e?.message);
     }
     return null;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ابزارهای تلگرام ─────────────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// TELEGRAM HELPERS
+// ═══════════════════════════════════════════════════════════════════
 async function sendVideo(chatId, url, caption) {
     try {
-        const r = await fetch(`${TELEGRAM_API}/sendVideo`, {
+        const r = await fetchTimeout(`${TELEGRAM_API}/sendVideo`, TG_TO, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -219,21 +269,27 @@ async function sendVideo(chatId, url, caption) {
         if (!j.ok) console.error('sendVideo fail:', j.description);
         return j.ok;
     } catch (e) {
-        console.error('sendVideo err:', e.message);
+        console.error('sendVideo err:', e?.message);
         return false;
     }
 }
 
 async function sendMsg(chatId, text) {
-    const r = await fetch(`${TELEGRAM_API}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
-    });
-    return r.json();
+    try {
+        await fetchTimeout(`${TELEGRAM_API}/sendMessage`, 3000, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text }),
+        });
+    } catch (e) {
+        console.error('sendMsg err:', e?.message);
+    }
 }
 
-async function fetchWithTimeout(url, ms, options = {}) {
+// ═══════════════════════════════════════════════════════════════════
+// FETCH WITH TIMEOUT
+// ═══════════════════════════════════════════════════════════════════
+async function fetchTimeout(url, ms, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {

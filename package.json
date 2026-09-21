@@ -3,5 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "main": "api/webhook.js"
+  "main": "api/webhook.js",
+  "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
+    "@ybd-project/ytdl-core": "^6.0.8"
+  }
 }
