@@ -4,7 +4,7 @@
       "maxDuration": 10
     },
     "api/dl.js": {
-      "maxDuration": 60
+      "maxDuration": 10
     }
   }
 }
