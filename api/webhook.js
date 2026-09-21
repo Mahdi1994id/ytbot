@@ -66,8 +66,13 @@ export default async function handler(req, res) {
         // سعی کن خود ویدیو رو بفرست
         const sent = await sendVideo(chatId, link.url, link.title);
         if (!sent) {
-            // sendVideo ناموفق بود — لینک دانلود بده
-            await sendMsg(chatId, '🔗 لینک دانلود:\n' + link.url);
+            // sendVideo ناموفق بود
+            if (kind === 'youtube') {
+                // برای یوتوب: لینک پروکسی بده که کاربر بتونه تو مرورگر باز کنه
+                await sendMsg(chatId, '⬇️ لینک دانلود (تو مرورگر باز کن):\n' + link.url);
+            } else {
+                await sendMsg(chatId, '🔗 لینک دانلود:\n' + link.url);
+            }
         }
     } catch (err) {
         console.error('Error:', err);
